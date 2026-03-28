@@ -262,6 +262,194 @@ function NightDoctorScreen({ state, myId }) {
   );
 }
 
+
+function GameLogSidebar({ state }) {
+  const { log } = state;
+  const logEndRef = useRef(null);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [log]);
+
+  return (
+    <div className="card chat-card" style={{ display: "flex", flexDirection: "column", height: "100%", maxHeight: "250px", padding: "20px" }}>
+      <h3 style={{ marginBottom: 12 }}>Game Log</h3>
+      <div className="chat-messages" style={{ flex: 1, overflowY: "auto", marginBottom: 12, paddingRight: 8, display: "flex", flexDirection: "column" }}>
+        {log?.length === 0 ? (
+          <div style={{ fontSize: "0.85rem", color: "var(--muted)", fontStyle: "italic" }}>No previous events yet.</div>
+        ) : (
+          log?.map((entry, i) => (
+            <div key={i} style={{ marginBottom: 8, fontSize: "0.82rem", opacity: 0.85, borderLeft: "2px solid var(--border)", paddingLeft: 8 }}>
+              {entry}
+            </div>
+          ))
+        )}
+        <div ref={logEndRef} />
+      </div>
+    </div>
+  );
+}
+
+function ChatSidebar({ state, myId }) {
+  const { chat, players } = state;
+  const [msg, setMsg] = useState("");
+  const chatEndRef = useRef(null);
+
+  const me = players.find(p => p.id === myId);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chat]);
+
+  const sendChat = (e) => {
+    e.preventDefault();
+    if (!msg.trim()) return;
+    getSocket().emit("chat_message", { text: msg });
+    setMsg("");
+  };
+
+  return (
+    <div className="card chat-card" style={{ display: "flex", flexDirection: "column", height: "100%", maxHeight: "500px", padding: "20px" }}>
+      <h3 style={{ marginBottom: 12 }}>Town Chat</h3>
+      <div className="chat-messages" style={{ flex: 1, overflowY: "auto", marginBottom: 12, paddingRight: 8, display: "flex", flexDirection: "column" }}>
+        {chat?.map((c, i) => (
+          <div key={i} style={{ marginBottom: 8, fontSize: "0.85rem", opacity: c.isAlive ? 1 : 0.6, wordBreak: "break-word" }}>
+            <span style={{ color: c.senderId === myId ? "var(--gold)" : c.isAlive ? "var(--white)" : "var(--muted)", fontWeight: "bold" }}>
+              {c.name} {!c.isAlive && "(ghost)"}:
+            </span>{" "}
+            <span style={{ color: "var(--cream)" }}>{c.text}</span>
+          </div>
+        ))}
+        <div ref={chatEndRef} />
+      </div>
+      {(me?.isAlive || state.phase === "gameover") ? (
+        <form onSubmit={sendChat} style={{ display: "flex", gap: 8, marginTop: "auto" }}>
+          <input value={msg} onChange={e => setMsg(e.target.value)} placeholder="Type a message..." style={{ padding: "8px 12px", fontSize: "0.85rem" }} maxLength={100} />
+          <button type="submit" className="btn-secondary" style={{ padding: "8px 16px", width: "auto" }}>Send</button>
+        </form>
+      ) : (
+        <div style={{ fontSize: "0.8rem", color: "var(--muted)", fontStyle: "italic", textAlign: "center", marginTop: "auto" }}>
+          Ghosts cannot speak until game over.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiscussionScreen({ state, myId }) {
+  const { players, round, discussionEndTime, dayVotes } = state;
+  const alivePlayers = players.filter((p) => p.isAlive);
+  const me = players.find((p) => p.id === myId);
+  const myVote = dayVotes?.[myId];
+
+  const [timeLeft, setTimeLeft] = useState("");
+
+  useEffect(() => {
+    if (!discussionEndTime) return;
+    const updateTimer = () => {
+      const remaining = Math.max(0, discussionEndTime - Date.now());
+      const m = Math.floor(remaining / 60000);
+      const s = Math.floor((remaining % 60000) / 1000);
+      setTimeLeft(`${m}:${s.toString().padStart(2, "0")}`);
+    };
+    updateTimer(); // Initial call
+    const interval = setInterval(updateTimer, 500);
+    return () => clearInterval(interval);
+  }, [discussionEndTime]);
+
+  const handleVote = (targetId) => {
+    if (me?.isAlive) {
+      getSocket().emit("day_vote", { targetId });
+    }
+  };
+
+  const getVoteCount = (targetId) => {
+    return Object.values(dayVotes || {}).filter(v => v === targetId).length;
+  };
+
+  const skipVotesCount = getVoteCount("skip");
+
+  return (
+    <div style={{ display: "flex", gap: "20px", width: "100%", maxWidth: "900px", flexWrap: "wrap", justifyContent: "center" }}>
+      <div className="panel" style={{ flex: "1 1 500px", maxWidth: "520px" }}>
+        <div className="card">
+          <div className="phase-label">Day {round} — Discussion & Voting</div>
+          <h2 style={{ marginBottom: 6 }}>Who is the Mafia?</h2>
+          <div style={{ fontSize: "2.5rem", fontWeight: "bold", color: "var(--gold)", marginBottom: 16, textAlign: "center" }}>
+            {timeLeft}
+          </div>
+          <p style={{ marginBottom: 20, fontSize: "0.85rem" }}>Click a player to vote for their execution. The most voted player will be eliminated.</p>
+          
+          <div className="divider"><span>alive players</span></div>
+          <div className="player-list">
+            {alivePlayers.map((p) => {
+              const count = getVoteCount(p.id);
+              return (
+                <div 
+                  className="player-item selectable" 
+                  key={p.id} 
+                  onClick={() => handleVote(p.id)}
+                  style={{ 
+                    borderColor: myVote === p.id ? 'var(--red)' : '',
+                    background: myVote === p.id ? 'rgba(192, 57, 43, 0.1)' : ''
+                  }}
+                >
+                  <div className="player-dot" />
+                  <span className="player-name">{p.name}{p.id === myId ? " (you)" : ""}</span>
+                  {count > 0 && <span style={{ fontSize: "0.75rem", color: "var(--red)", fontWeight: "bold", marginRight: 8 }}>{count} vote{count > 1 ? 's' : ''}</span>}
+                </div>
+              );
+            })}
+          </div>
+
+          {me?.isAlive && (
+            <button 
+              className={myVote === "skip" ? "btn-ghost" : "btn-secondary"} 
+              onClick={() => handleVote("skip")}
+              style={{ marginTop: 20, borderColor: myVote === "skip" ? 'var(--gold)' : '' }}
+            >
+              {myVote === "skip" ? "Voted to Skip / Abstain" : "Vote to Skip / Abstain"} 
+              <span style={{ marginLeft: 8, fontSize: "0.8rem", opacity: 0.8 }}>
+                ({skipVotesCount}/{alivePlayers.length})
+              </span>
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="panel" style={{ flex: "1 1 300px", maxWidth: "380px", display: "flex", flexDirection: "column", gap: "20px" }}>
+        <GameLogSidebar state={state} />
+        <ChatSidebar state={state} myId={myId} />
+      </div>
+    </div>
+  );
+}
+
+function DayResultScreen({ state }) {
+  const { dayResult, round } = state;
+
+  return (
+    <div className="panel" style={{ maxWidth: 520 }}>
+      <div className="card">
+        <div className="phase-label">Dusk — Round {round} Result</div>
+        <h2 style={{ marginBottom: 16 }}>The Town Has Spoken</h2>
+
+        {dayResult && (
+          <div className={`notification ${dayResult.executedId ? "notif-red" : "notif-gold"}`}>
+            {dayResult.executedId ? 
+              `The town executed ${dayResult.executedName}. They were a ${dayResult.executedRole === 'mafia' ? 'Mafia' : dayResult.executedRole === 'doctor' ? 'Doctor' : 'Crew Member'}.` :
+              "The town could not reach a decision, or a majority voted to abstain. Nobody was executed."
+            }
+          </div>
+        )}
+
+        <p style={{ textAlign: "center", fontSize: "0.8rem", marginTop: 12, fontStyle: "italic" }}>
+          Night begins shortly…
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function ResultScreen({ state, myId }) {
   const { nightResult, players, myRole, round, log } = state;
   const alivePlayers = players.filter(p => p.isAlive);
@@ -433,6 +621,8 @@ export default function App() {
         {phase === "night_mafia" && <NightMafiaScreen state={gameState} myId={id} />}
         {phase === "night_doctor" && <NightDoctorScreen state={gameState} myId={id} />}
         {phase === "result" && <ResultScreen state={gameState} myId={id} />}
+        {phase === "discussion" && <DiscussionScreen state={gameState} myId={id} />}
+        {phase === "day_result" && <DayResultScreen state={gameState} myId={id} />}
         {phase === "gameover" && <GameOverScreen state={gameState} myId={id} />}
       </div>
     );

@@ -33,6 +33,87 @@ function getRoom(roomId) {
   return rooms[roomId];
 }
 
+function resolveDay(room) {
+  if (room.discussionTimeout) {
+    clearTimeout(room.discussionTimeout);
+    room.discussionTimeout = null;
+  }
+  
+  const counts = {};
+  let maxVotes = 0;
+  let targetsWithMax = [];
+  
+  Object.values(room.dayVotes || {}).forEach(vote => {
+    counts[vote] = (counts[vote] || 0) + 1;
+    if (counts[vote] > maxVotes) {
+      maxVotes = counts[vote];
+      targetsWithMax = [vote];
+    } else if (counts[vote] === maxVotes) {
+      targetsWithMax.push(vote);
+    }
+  });
+
+  let executed = null;
+  if (targetsWithMax.length === 1 && targetsWithMax[0] !== "skip") {
+    const targetId = targetsWithMax[0];
+    executed = room.players.find(p => p.id === targetId);
+    if (executed) {
+      executed.isAlive = false;
+      const roleStr = room.roles[executed.id] === "mafia" ? "Mafia" : room.roles[executed.id] === "doctor" ? "Doctor" : "Crew Member";
+      room.log.push(`Day ${room.round}: The town executed ${executed.name}. They were a ${roleStr}.`);
+    }
+  } else {
+    room.log.push(`Day ${room.round}: The town could not reach a decision, or voted to skip. Nobody was executed.`);
+  }
+
+  room.dayResult = {
+    executedId: executed ? executed.id : null,
+    executedName: executed ? executed.name : null,
+    executedRole: executed ? room.roles[executed.id] : null,
+  };
+
+  room.phase = "day_result";
+  
+  // Check win conditions
+  const alivePlayers = room.players.filter((p) => p.isAlive);
+  const aliveMafia = alivePlayers.filter((p) => room.roles[p.id] === "mafia");
+  const aliveCrew = alivePlayers.filter((p) => room.roles[p.id] !== "mafia");
+
+  if (aliveMafia.length === 0) {
+    room.winner = "crew";
+    room.phase = "gameover";
+  } else if (aliveMafia.length >= aliveCrew.length) {
+    room.winner = "mafia";
+    room.phase = "gameover";
+  }
+
+  broadcastRoomState(room.id);
+
+  if (room.phase === "day_result") {
+    setTimeout(() => {
+      if (room.phase === "day_result") {
+        startNextRound(room);
+      }
+    }, 6000);
+  }
+}
+
+function startNextRound(room) {
+  room.round += 1;
+  room.phase = "night_mafia";
+  room.mafiaTarget = null;
+  room.doctorTarget = null;
+  room.nightResult = null;
+  room.dayResult = null;
+  room.discussionEndTime = null;
+  room.dayVotes = {};
+  if (room.discussionTimeout) {
+    clearTimeout(room.discussionTimeout);
+    room.discussionTimeout = null;
+  }
+  broadcastRoomState(room.id);
+}
+
 function broadcastRoomState(roomId) {
   const room = getRoom(roomId);
   if (!room) return;
@@ -56,6 +137,10 @@ function broadcastRoomState(roomId) {
       log: room.log,
       winner: room.winner || null,
       nightResult: room.nightResult || null,
+      discussionEndTime: room.discussionEndTime || null,
+      dayVotes: room.dayVotes || {},
+      dayResult: room.dayResult || null,
+      chat: room.chat || [],
     });
   });
 }
@@ -77,6 +162,9 @@ io.on("connection", (socket) => {
       doctorTarget: null,
       winner: null,
       nightResult: null,
+      dayResult: null,
+      chat: [],
+      dayVotes: {},
     };
     socket.join(roomId);
     socket.data.roomId = roomId;
@@ -189,18 +277,71 @@ io.on("connection", (socket) => {
 
     broadcastRoomState(roomId);
 
-    // Auto-advance to next round after 6s if game not over
+    // Auto-advance to discussion after 6s if game not over
     if (room.phase === "result") {
       setTimeout(() => {
         if (room.phase === "result") {
-          room.round += 1;
-          room.phase = "night_mafia";
-          room.mafiaTarget = null;
-          room.doctorTarget = null;
-          room.nightResult = null;
+          room.phase = "discussion";
+          room.discussionEndTime = Date.now() + 5 * 60 * 1000;
+          room.dayVotes = {};
           broadcastRoomState(roomId);
+
+          room.discussionTimeout = setTimeout(() => {
+            if (room.phase === "discussion") {
+              resolveDay(room);
+            }
+          }, 5 * 60 * 1000);
         }
       }, 6000);
+    }
+  });
+
+  // Chat System
+  socket.on("chat_message", ({ text }) => {
+    const roomId = socket.data.roomId;
+    const room = getRoom(roomId);
+    if (!room) return;
+    
+    const me = room.players.find((p) => p.id === socket.id);
+    if (!me) return;
+    
+    // Alive players can chat during game, dead players can only chat if game over
+    // Let's actually let dead players chat, but maybe mark them as dead (classic Mafia doesn't, but ghost chat is fun). 
+    // To be strict to classic, dead players shouldn't talk to alive players. Let's just allow it but they have a ghost symbol.
+    
+    if (!room.chat) room.chat = [];
+    room.chat.push({ senderId: me.id, name: me.name, text, time: Date.now(), isAlive: me.isAlive });
+    
+    if (room.chat.length > 50) room.chat.shift();
+    broadcastRoomState(roomId);
+  });
+
+  // Vote during the day
+  socket.on("day_vote", ({ targetId }) => {
+    const roomId = socket.data.roomId;
+    const room = getRoom(roomId);
+    if (!room || room.phase !== "discussion") return;
+
+    const me = room.players.find((p) => p.id === socket.id);
+    if (!me || !me.isAlive) return;
+
+    if (!room.dayVotes) room.dayVotes = {};
+    
+    // Toggle vote off if clicking the same person/skip again
+    if (room.dayVotes[socket.id] === targetId) {
+      delete room.dayVotes[socket.id];
+    } else {
+      room.dayVotes[socket.id] = targetId;
+    }
+
+    const aliveCount = room.players.filter((p) => p.isAlive).length;
+    const voteCount = Object.keys(room.dayVotes).length;
+    
+    // If all alive players have voted
+    if (voteCount >= aliveCount) {
+      resolveDay(room);
+    } else {
+      broadcastRoomState(roomId);
     }
   });
 
@@ -220,8 +361,16 @@ io.on("connection", (socket) => {
     room.log = [];
     room.winner = null;
     room.nightResult = null;
+    room.dayResult = null;
     room.mafiaTarget = null;
     room.doctorTarget = null;
+    room.discussionEndTime = null;
+    room.dayVotes = {};
+    room.chat = [];
+    if (room.discussionTimeout) {
+      clearTimeout(room.discussionTimeout);
+      room.discussionTimeout = null;
+    }
     broadcastRoomState(roomId);
 
     setTimeout(() => {
